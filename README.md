@@ -1,159 +1,132 @@
-# MITM-PRO (Phân tích mã nguồn)
+# MITM-PRO
 
-> ⚠️ **Chỉ dùng cho lab nội bộ có ủy quyền bằng văn bản.**
-> Repository này chứa công cụ can thiệp lưu lượng mạng (ARP spoofing / MITM). Không sử dụng trên hệ thống không thuộc quyền kiểm thử hợp pháp.
-
-## 1) Tổng quan
-
-`mitm_pro.py` là script Python chạy trên Linux, kết hợp:
-- `scapy` để ARP scan và ARP poisoning.
-- `responder` để bắt các xác thực kiểu NTLM/SMB/HTTP.
-- `tcpdump` để ghi PCAP.
-- `rich` để hiển thị dashboard realtime.
-
-Mục tiêu kỹ thuật của script: dựng phiên MITM trên LAN giữa gateway và một hoặc nhiều target, đồng thời ghi log/pcap và tạo báo cáo HTML cuối phiên.
+> ⚠️ **Công cụ này chỉ được phép chạy trong môi trường lab nội bộ, có giấy phép bằng văn bản từ người có thẩm quyền. Tuyệt đối không dùng trên hệ thống của người khác nếu chưa được cho phép.**
 
 ---
 
-## 2) Kiến trúc chính trong source
+## Giới thiệu
 
-### `Config`
-- Quản lý hằng số phiên chạy: version, log file, output dir.
-- `set_output_dir()` tạo thư mục output và thiết lập:
-  - `responder.log`
-  - `capture.pcap`
+MITM-PRO là công cụ kiểm thử bảo mật mạng nội bộ dành cho các bài lab pentest có kiểm soát. Tên đầy đủ là **Man-In-The-Middle Professional** — nghĩa là chương trình đặt máy của người kiểm thử vào vị trí trung gian giữa hai thiết bị trên cùng mạng LAN, thường là giữa một máy tính nào đó và cổng mạng (router). Từ vị trí đó, toàn bộ dữ liệu đi lại giữa hai đầu đều chạy qua máy bạn trước khi đến đích thật.
 
-### `State`
-- Lưu trạng thái runtime dạng global:
-  - interface, gateway, gateway MAC
-  - danh sách target + lock thread
-  - process của responder/tcpdump
-  - thread poisoning
-  - mode và trạng thái `ip_forward` ban đầu
-
-### `get_mac(ip)`
-- Dò MAC qua ARP request (`srp`) và cache vào `mac_cache`.
-- Trả `None` nếu không resolve được.
-
-### `scan_live_hosts(cidr)`
-- Quét ARP theo CIDR, bỏ qua gateway.
-- Có giới hạn số host theo `Config.MAX_TARGETS`.
-
-### `ArpPoisoner(Thread)`
-- `run()`:
-  - Resolve MAC gateway.
-  - Pre-cache MAC target.
-  - Lặp gửi 2 gói ARP giả:
-	 - target nhận “gateway = attacker”
-	 - gateway nhận “target = attacker”
-- `stop()`:
-  - Gửi ARP restore 2 chiều để phục hồi bảng ARP.
-
-### `start_services()`
-- Chạy `responder` và `tcpdump` bằng `subprocess.Popen`.
-- Khởi tạo thread `ArpPoisoner`.
-
-### `make_dashboard()`
-- Vẽ giao diện realtime bằng `rich.Live`:
-  - Header: version, uptime, mode, interface, số target
-  - Main: bảng trạng thái target + MAC
-  - Footer: số dòng NTLM gần đây + dung lượng PCAP
-
-### `generate_report()`
-- Sinh HTML report với thời gian, số target, số dòng chứa `NTLM`, đường dẫn log/pcap.
-
-### `cleanup()`
-- Dừng thread/process, restore `net.ipv4.ip_forward`, sinh report cuối phiên.
-
-### `main()`
-- Check Linux + quyền root.
-- Parse CLI args hoặc vào chế độ interactive.
-- Bật `ip_forward=1`, start service, chạy dashboard loop.
-- Nhận `Ctrl+C` để thoát và cleanup.
+Công cụ này giúp đội bảo mật kiểm tra xem: liệu kẻ xấu có thể ngồi lặng lẽ trong mạng rồi chặn bắt mật khẩu, phiên đăng nhập hay dữ liệu nhạy cảm không — từ đó tìm ra lỗ hổng và vá trước khi bị khai thác thật.
 
 ---
 
-## 3) Tham số CLI hiện có
+## Cách hoạt động
 
-- `-i, --interface`: network interface.
-- `-g, --gateway`: IP gateway.
-- `-R, --range`: CIDR scan targets.
-- `-T, --targets`: danh sách IP phân tách dấu phẩy.
-- `-o, --outdir`: thư mục output (mặc định `mitm_pro_loot`).
-- `--mode`: `safe | normal | aggressive` (điều chỉnh chu kỳ ARP).
-- `--max-targets`: giới hạn target (xem lưu ý bug bên dưới).
-- `--report`: cờ report (hiện tại chưa tác dụng thực tế).
-- `--dry-run`: chỉ kiểm tra luồng, không thực thi tấn công.
+Khi bạn khởi động, chương trình thực hiện 4 việc cùng lúc:
 
----
+1. **Quét mạng** — Tìm xem có những máy nào đang bật trong dải mạng bạn chỉ định.
+2. **Chặn giữa đường** — Liên tục gửi thông điệp giả đến các máy mục tiêu và router, khiến cả hai tưởng rằng máy bạn chính là đầu kia của kết nối. Nhờ đó toàn bộ lưu lượng sẽ đi qua máy bạn.
+3. **Bắt thông tin đăng nhập** — Ghi lại các lần đăng nhập Windows, chia sẻ file nội bộ (SMB), trình duyệt web (HTTP) đang truyền trên mạng.
+4. **Ghi lại lưu lượng** — Lưu toàn bộ gói tin ra file để đội bảo mật đem về phân tích sau.
 
-## 4) File output sau một phiên
-
-- `mitm_pro.log`: log runtime của script.
-- `<outdir>/responder.log`: log từ responder.
-- `<outdir>/capture.pcap`: lưu lượng mạng bắt bởi tcpdump.
-- `<outdir>/PENTEST_REPORT_YYYYMMDD_HHMM.html`: báo cáo tổng kết.
+Khi bạn nhấn `Ctrl+C` để dừng, chương trình tự dọn dẹp: trả bảng mạng về trạng thái cũ rồi tạo báo cáo tổng kết dạng HTML.
 
 ---
 
-## 5) Các điểm quan trọng / rủi ro trong code
+## Cài đặt
 
-1. **`--max-targets` chưa được áp vào `Config.MAX_TARGETS`**
-	- Parser nhận tham số nhưng không gán lại config, nên scan vẫn dùng giá trị mặc định 25.
+### Yêu cầu máy
 
-2. **`--report` đang không có tác dụng**
-	- `cleanup()` luôn gọi `generate_report()` bất kể cờ `--report`.
+- Hệ điều hành **Linux** (Ubuntu, Kali, Debian đều được).
+- Có **quyền root** (chạy bằng `sudo`).
+- Đã cài **Python 3.10** trở lên.
 
-3. **Thiếu kiểm tra dependency runtime**
-	- Script chỉ check import Python (`scapy`, `rich`) nhưng không check binary `responder`, `tcpdump` trước khi chạy.
+### Cài các thứ cần thiết
 
-4. **Xử lý lỗi còn rộng (`except:`/`except Exception`)**
-	- Một số chỗ nuốt lỗi khiến khó truy vết sự cố thực tế.
+```bash
+# Cài thư viện Python
+pip3 install scapy rich
 
-5. **Thiếu validate input mạng**
-	- Chưa kiểm tra format IP/CIDR/interface trước khi dùng.
+# Cài công cụ hệ thống
+sudo apt update
+sudo apt install -y tcpdump responder
+```
 
-6. **Quản lý process dừng chưa “cứng”**
-	- `terminate()` không `wait()` hoặc fallback `kill()` khi process treo.
+### Tải về
 
-7. **Import wildcard `from scapy.all import *`**
-	- Khó kiểm soát namespace, khó maintain lâu dài.
-
----
-
-## 6) Đề xuất cải tiến kỹ thuật
-
-- Gán `Config.MAX_TARGETS = args.max_targets` ngay sau parse args.
-- Thêm cờ cấu hình thực cho report (ví dụ `state.enable_report = args.report`).
-- Kiểm tra binary bằng `shutil.which("responder")` / `shutil.which("tcpdump")`.
-- Validate IP/CIDR bằng `ipaddress`.
-- Thay `except:` bằng exception cụ thể + log rõ nguyên nhân.
-- Dừng process an toàn: `terminate() -> wait(timeout) -> kill()`.
-- Tách wildcard import scapy thành import tường minh để code rõ hơn.
+```bash
+git clone https://github.com/doankhanh212/mitm.git
+cd mitm
+```
 
 ---
 
-## 7) Cách kiểm tra an toàn (không tấn công)
+## Cách dùng
 
-Chỉ dùng chế độ dry-run để kiểm tra parser và luồng khởi tạo:
+### Chạy thử — không làm gì thật
+
+Dùng khi bạn muốn kiểm tra chương trình có lỗi không mà chưa muốn tác động gì vào mạng:
 
 ```bash
 sudo python3 mitm_pro.py --dry-run
 ```
 
-Nếu cần kiểm thử đầy đủ, chỉ thực hiện trong môi trường lab cô lập và có phê duyệt chính thức.
+### Chạy theo kiểu hỏi đáp
+
+Nếu không truyền tham số, chương trình sẽ tự hỏi từng bước:
+
+```bash
+sudo python3 mitm_pro.py
+```
+
+Lần lượt nhập theo hướng dẫn trên màn hình:
+- Tên card mạng đang dùng (ví dụ `eth0`).
+- Địa chỉ IP của router (ví dụ `192.168.1.1`).
+- Nhập thẳng danh sách máy cần kiểm thử, hoặc để chương trình tự quét cả dải mạng.
+
+### Chạy nhanh bằng lệnh đầy đủ
+
+```bash
+sudo python3 mitm_pro.py \
+  -i eth0 \
+  -g 192.168.1.1 \
+  -R 192.168.1.0/24 \
+  --mode safe
+```
+
+### Giải thích các tham số
+
+| Tham số | Ý nghĩa |
+|---|---|
+| `-i` | Tên card mạng (ví dụ `eth0`, `wlan0`) |
+| `-g` | Địa chỉ IP của router/gateway |
+| `-R` | Tự động quét toàn bộ dải mạng (ví dụ `192.168.1.0/24`) |
+| `-T` | Nhập thẳng danh sách IP, cách nhau bằng dấu phẩy |
+| `-o` | Thư mục lưu kết quả (mặc định là `mitm_pro_loot`) |
+| `--mode` | Tốc độ gửi gói tin: `safe` (chậm, ít bị phát hiện) / `normal` / `aggressive` |
+| `--dry-run` | Chạy thử, không thực sự can thiệp mạng |
 
 ---
 
-## 8) Phụ thuộc
+## Màn hình khi đang chạy
 
-- Python 3.10+
-- Package Python: `scapy`, `rich`
-- Công cụ hệ thống: `responder`, `tcpdump`, `sysctl`
-- Linux + quyền `root`
+Trong lúc chạy bạn sẽ thấy một bảng điều khiển tự cập nhật gồm 3 khu vực:
+
+- **Trên cùng** — Thời gian đã chạy, chế độ đang dùng, tên card mạng, số máy đang bị can thiệp.
+- **Giữa** — Danh sách từng máy mục tiêu cùng trạng thái (đã chặn được chưa).
+- **Dưới cùng** — Số lần bắt được thông tin đăng nhập và dung lượng file ghi tính đến lúc đó.
+
+Nhấn **`Ctrl+C`** bất cứ lúc nào để dừng. Chương trình tự phục hồi mạng rồi lưu báo cáo.
 
 ---
 
-## 9) Lưu ý pháp lý
+## Kết quả sau một phiên làm việc
 
-Tác giả đã ghi rõ “Authorized Internal Exercise ONLY”. Việc sử dụng trên hệ thống trái phép có thể vi phạm pháp luật và chính sách an toàn thông tin.
+Tất cả nằm trong thư mục `mitm_pro_loot/` (hoặc thư mục bạn chỉ định bằng `-o`):
+
+| File | Nội dung |
+|---|---|
+| `mitm_pro.log` | Nhật ký hoạt động của chương trình |
+| `responder.log` | Danh sách thông tin đăng nhập bắt được trong phiên |
+| `capture.pcap` | Toàn bộ gói tin đã đi qua máy, mở bằng Wireshark để xem |
+| `PENTEST_REPORT_*.html` | Báo cáo tổng kết, mở bằng trình duyệt web bất kỳ |
+
+---
+
+## Lưu ý quan trọng
+
+Sử dụng công cụ này trên mạng không được phép là **vi phạm pháp luật**. Chỉ dùng trong:
+- Môi trường lab riêng của bạn.
+- Bài kiểm thử nội bộ có hợp đồng hoặc giấy phép rõ ràng bằng văn bản.
