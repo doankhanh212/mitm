@@ -305,7 +305,6 @@ def main():
             state.targets = [t.strip() for t in args.targets.split(",") if t.strip()]
     else:
         # Interactive nếu thiếu
-        show_banner()
         state.iface = console.input("🌐 Interface: ") or "eth0"
         state.gw = console.input("🔴 Gateway IP: ")
         choice = console.input("🎯 1=List IP | 2=CIDR: ")
