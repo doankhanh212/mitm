@@ -1,0 +1,32 @@
+# ═══════════════════════════════════════════════════════
+# MITM-PRO v5.0 — Default Configuration (YAML)
+# Chỉ dùng cho bài kiểm thử nội bộ có ủy quyền
+# ═══════════════════════════════════════════════════════
+
+# ── Mạng ──────────────────────────────────────────────
+interface: eth0
+gateway: ""
+cidr: ""
+mode: safe                  # safe | normal | aggressive
+max_targets: 25
+
+# ── Bettercap REST API ────────────────────────────────
+api_host: "127.0.0.1"
+api_port: 8083
+api_user: "mitmpro"
+api_pass: "mitmpro"
+
+# ── Module bật/tắt ───────────────────────────────────
+arp_spoof: true
+https_proxy: true
+sslstrip: true
+dns_spoof: false
+dns_domains: ""             # vd: "*.corp.local"
+dns_address: ""             # vd: "10.0.0.5"
+responder: true
+pcap: true
+
+# ── Output ────────────────────────────────────────────
+output_dir: "mitm_pro_loot"
+log_file: "mitm_pro.log"
+enable_report: true
