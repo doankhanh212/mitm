@@ -9,6 +9,7 @@ import logging
 import shutil
 import subprocess
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -39,17 +40,21 @@ class BettercapEngine:
         if shutil.which("bettercap") is None:
             raise FileNotFoundError("Không tìm thấy bettercap trong PATH")
 
+        eval_cmd = "; ".join([
+            f"set api.rest.address {self.cfg.api_host}",
+            f"set api.rest.port {self.cfg.api_port}",
+            "api.rest on",
+        ])
+
         cmd = [
             "bettercap",
             "-iface", self.state.iface,
-            "-api-rest-address", self.cfg.api_host,
-            "-api-rest-port", str(self.cfg.api_port),
-            "-api-rest-username", self.cfg.api_user,
-            "-api-rest-password", self.cfg.api_pass,
+            "-eval", eval_cmd,
             "-silent",
         ]
 
         log_path = self.cfg.output_dir / "bettercap_stdout.log"
+        self._log_path = log_path
         self._log_fd = open(log_path, "w")  # giữ reference để đóng khi stop()
 
         logging.info(f"🚀 Khởi động bettercap trên {self.state.iface}...")
@@ -61,10 +66,14 @@ class BettercapEngine:
         return self.proc
 
     def wait_api_ready(self, timeout: int = 20) -> bool:
-        """Chờ REST API sẵn sàng (poll mỗi 0.5s)."""
+        """Chờ REST API sẵn sàng, đồng thời fail sớm nếu bettercap chết trước."""
         logging.info("⏳ Chờ Bettercap API sẵn sàng...")
         deadline = time.time() + timeout
         while time.time() < deadline:
+            if self.proc is not None and self.proc.poll() is not None:
+                logging.error("❌ Bettercap đã thoát trước khi REST API sẵn sàng")
+                self._log_early_failure()
+                return False
             try:
                 r = self._session.get(f"{self.base_url}/api/session", timeout=2)
                 if r.status_code == 200:
@@ -74,7 +83,26 @@ class BettercapEngine:
                 pass
             time.sleep(0.5)
         logging.error("❌ Bettercap API không phản hồi sau timeout")
+        self._log_early_failure()
         return False
+
+    def _log_early_failure(self, lines: int = 20):
+        """In ra vài dòng cuối của bettercap log để dễ debug khi startup fail."""
+        try:
+            log_path = getattr(self, "_log_path", None)
+            if not log_path:
+                return
+            path = Path(log_path)
+            if not path.exists():
+                return
+            content = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            tail = content[-lines:]
+            if tail:
+                logging.error("❌ Bettercap startup log:")
+                for line in tail:
+                    logging.error(f"   {line}")
+        except Exception:
+            pass
 
     def stop(self):
         """Dừng bettercap an toàn: tắt module rồi đóng log file."""
