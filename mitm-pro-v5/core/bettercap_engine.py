@@ -43,6 +43,8 @@ class BettercapEngine:
         eval_cmd = "; ".join([
             f"set api.rest.address {self.cfg.api_host}",
             f"set api.rest.port {self.cfg.api_port}",
+            f"set api.rest.username {self.cfg.api_user}",
+            f"set api.rest.password {self.cfg.api_pass}",
             "api.rest on",
         ])
 
@@ -63,26 +65,47 @@ class BettercapEngine:
         )
         self.state.bettercap_running = True
         logging.info(f"   PID: {self.proc.pid} | API: {self.base_url}")
+        
+        # Đợi một chút để bettercap khởi động hoàn toàn
+        time.sleep(2)
         return self.proc
 
-    def wait_api_ready(self, timeout: int = 20) -> bool:
+    def wait_api_ready(self, timeout: int = 30) -> bool:
         """Chờ REST API sẵn sàng, đồng thời fail sớm nếu bettercap chết trước."""
         logging.info("⏳ Chờ Bettercap API sẵn sàng...")
         deadline = time.time() + timeout
+        attempt = 0
         while time.time() < deadline:
+            attempt += 1
+            
+            # Kiểm tra process còn sống không
             if self.proc is not None and self.proc.poll() is not None:
-                logging.error("❌ Bettercap đã thoát trước khi REST API sẵn sàng")
+                exit_code = self.proc.poll()
+                logging.error(f"❌ Bettercap đã thoát với mã {exit_code} trước khi REST API sẵn sàng")
                 self._log_early_failure()
                 return False
+            
             try:
-                r = self._session.get(f"{self.base_url}/api/session", timeout=2)
+                r = self._session.get(f"{self.base_url}/api/session", timeout=3)
                 if r.status_code == 200:
-                    logging.info("✅ Bettercap API đã sẵn sàng")
+                    logging.info(f"✅ Bettercap API đã sẵn sàng (sau {attempt} lần thử)")
                     return True
+                elif r.status_code == 401:
+                    logging.error("❌ Lỗi xác thực API - username/password không đúng")
+                    return False
+                else:
+                    logging.debug(f"API trả về status {r.status_code}, thử lại...")
             except requests.ConnectionError:
+                # API chưa sẵn sàng, tiếp tục retry
                 pass
-            time.sleep(0.5)
-        logging.error("❌ Bettercap API không phản hồi sau timeout")
+            except requests.exceptions.Timeout:
+                logging.debug(f"Timeout lần {attempt}, thử lại...")
+            except Exception as e:
+                logging.debug(f"Lỗi khi kiểm tra API: {e}")
+            
+            time.sleep(1)
+        
+        logging.error(f"❌ Bettercap API không phản hồi sau {timeout}s")
         self._log_early_failure()
         return False
 

@@ -70,6 +70,18 @@ def _validate_cidr(cidr: str) -> bool:
         return False
 
 
+def _validate_interface(iface: str) -> bool:
+    """Kiểm tra interface có tồn tại trên hệ thống không."""
+    try:
+        result = subprocess.run(
+            ["ip", "link", "show", iface],
+            capture_output=True, text=True, timeout=5
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 # ─── Scan live hosts (dùng bettercap net.probe hoặc fallback nmap) ───
 
 def scan_live_hosts_arp(iface: str, cidr: str, max_targets: int) -> list:
@@ -128,6 +140,18 @@ def interactive_wizard(cfg: Config, state: State):
     console.print("\n[bold cyan]═══ Interactive Wizard ═══[/]\n")
 
     state.iface = console.input("🌐 Interface [dim](mặc định eth0)[/]: ").strip() or cfg.interface
+    
+    # Validate interface
+    while not _validate_interface(state.iface):
+        console.print(f"[red]   Interface '{state.iface}' không tồn tại![/]")
+        result = subprocess.run(["ip", "link", "show"], capture_output=True, text=True)
+        console.print("[yellow]   Các interface có sẵn:[/]")
+        for line in result.stdout.splitlines():
+            if ": " in line and not line.startswith(" "):
+                iface_name = line.split(":")[1].strip()
+                console.print(f"     • {iface_name}")
+        state.iface = console.input("🌐 Interface: ").strip()
+    
     state.gw = console.input("🔴 Gateway IP: ").strip()
 
     while not _validate_ip(state.gw):
@@ -271,6 +295,16 @@ def main():
         _state.iface = args.interface or _cfg.interface
         _state.gw = args.gateway
 
+        # Validate interface
+        if not _validate_interface(_state.iface):
+            logging.error(f"❌ Interface '{_state.iface}' không tồn tại!")
+            logging.error("   Các interface có sẵn:")
+            result = subprocess.run(["ip", "link", "show"], capture_output=True, text=True)
+            for line in result.stdout.splitlines():
+                if ": " in line and not line.startswith(" "):
+                    logging.error(f"     {line.split(':')[1].strip()}")
+            sys.exit(1)
+
         if not _validate_ip(_state.gw):
             logging.error(f"❌ Gateway IP không hợp lệ: {_state.gw}")
             sys.exit(1)
@@ -334,8 +368,13 @@ def main():
     _engine = BettercapEngine(_cfg, _state)
     bettercap_proc = _engine.start_process()
 
-    if not _engine.wait_api_ready(timeout=25):
+    if not _engine.wait_api_ready(timeout=30):
         logging.error("❌ Bettercap không khởi động được — thoát")
+        logging.error("💡 Kiểm tra:")
+        logging.error("   1. Interface có đúng không? (ip addr show)")
+        logging.error("   2. Chạy với sudo?")
+        logging.error("   3. Port 8083 có bị chiếm không? (netstat -tlnp | grep 8083)")
+        logging.error(f"   4. Xem log chi tiết: {_cfg.output_dir}/bettercap_stdout.log")
         full_cleanup(_cfg, _state, bettercap_proc=bettercap_proc)
         sys.exit(1)
 
